@@ -1,31 +1,32 @@
-import UtilController from './UtilController';
-import dbClient from '../utils/db';
+import Queue from 'bull';
+import UsersCollection from '../utils/users';
 
-export default class UsersController {
-  static async postNew(request, response) {
-    const { email, password } = request.body;
-    if (!email || !password) {
-      response.status(400).json({ error: `Missing ${!email ? 'email' : 'password'}` }).end();
-    } else if (await dbClient.userExists(email)) {
-      response.status(400).json({ error: 'Already exist' }).end();
+// User welcome email queue
+const userQueue = Queue('send welcome email');
+
+class UsersController {
+  /**
+   * Controller for endpoint POST /users for creating new users
+   * @typedef {import("express").Request} Request
+   * @typedef {import("express").Response} Response
+   * @param {Request} req - request object
+   * @param {Response} res - response object
+   */
+  static async postNew(req, res) {
+    const { email, password } = req.body;
+    if (email === undefined) {
+      res.status(400).json({ error: 'Missing email' });
+    } else if (password === undefined) {
+      res.status(400).json({ error: 'Missing password' });
+    } else if (await UsersCollection.getUser({ email })) {
+      res.status(400).json({ error: 'Already exist' });
     } else {
-      try {
-        const passwordHash = UtilController.SHA1(password);
-        const insert = await dbClient.newUser(email, passwordHash);
-        const { _id } = insert.ops[0];
-        const _email = insert.ops[0].email;
-        response.status(201).json({ id: _id, email: _email }).end();
-      } catch (err) {
-        response.status(400).json({ error: err.message }).end();
-      }
+      // Create new user
+      const userId = await UsersCollection.createUser(email, password);
+      userQueue.add({ userId });
+      res.status(201).json({ id: userId, email });
     }
   }
-
-  static async getMe(request, response) {
-    const { usr } = request;
-    delete usr.password;
-    usr.id = usr._id;
-    delete usr._id;
-    response.status(200).json(usr).end();
-  }
 }
+
+export default UsersController;
