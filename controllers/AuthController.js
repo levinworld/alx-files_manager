@@ -1,69 +1,44 @@
-import UsersCollection from '../utils/users';
-import AuthTokenHandler from '../utils/tokens';
-import PasswordHandler from '../utils/passwords';
+import sha1 from 'sha1';
+import { v4 as uuidv4 } from 'uuid';
+import dbClient from '../utils/db';
+import redisClient from '../utils/redis';
 
 class AuthController {
-  /**
-   * Controller for GET /connect endpoint for authorizing users
-   * using Basic Auth scheme
-   * @param {import("express").Request} req - request object
-   * @param {import("express").Response} res - response object
-   */
-  static async getConnect(req, res) {
-    // Get authorization parameters
-    const authParams = req.get('Authorization');
-    if (!authParams) return res.status(401).json({ error: 'Unauthorized' });
-
-    // Get base64 authentication parameters and decrypt to ascii
-    const credentials = Buffer
-      .from(authParams.replace('Basic', ''), 'base64')
-      .toString('ascii')
-      .split(':');
-    const email = credentials[0] || '';
-    const password = credentials[1] || '';
-
-    // Check if user exists
-    const user = await UsersCollection.getUser({ email });
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    // Check if passwords match
-    if (!PasswordHandler.isPasswordValid(password, user.password)) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const token = await AuthTokenHandler.createAuthToken(user);
-    return res.status(200).json({ token });
-  }
-
-  /**
-   * Controller for GET /disconnect endpoint that logs out user
-   * if they were logged in.
-   * @param {import("express").Request} req - request object
-   * @param {import("express").Response} res - response object
-   */
-  static async getDisconnect(req, res) {
-    const token = req.get('X-Token');
-    if (!await AuthTokenHandler.getUserByToken(token)) {
-      res.status(401).json({ error: 'Unauthorized' });
+  static async getConnect(request, response) {
+    const authData = request.header('Authorization');
+    let userEmail = authData.split(' ')[1];
+    const buff = Buffer.from(userEmail, 'base64');
+    userEmail = buff.toString('ascii');
+    const data = userEmail.split(':'); // contains email and password
+    if (data.length !== 2) {
+      response.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    await AuthTokenHandler.deleteAuthToken(token);
-    res.status(204).json();
+    const hashedPassword = sha1(data[1]);
+    const users = dbClient.db.collection('users');
+    users.findOne({ email: data[0], password: hashedPassword }, async (err, user) => {
+      if (user) {
+        const token = uuidv4();
+        const key = `auth_${token}`;
+        await redisClient.set(key, user._id.toString(), 60 * 60 * 24);
+        response.status(200).json({ token });
+      } else {
+        response.status(401).json({ error: 'Unauthorized' });
+      }
+    });
   }
 
-  /**
-   * Controller for GET /users/me endpoint that retrieves information
-   * about a logged in user
-   * @param {import("express").Request} req - request object
-   * @param {import("express").Response} res - response object
-   */
-  static async getMe(req, res) {
-    const { user } = req;
-    if (!user) res.status(401).json({ error: 'Unauthorized' });
-    else res.status(200).json({ id: user._id.toString(), email: user.email });
+  static async getDisconnect(request, response) {
+    const token = request.header('X-Token');
+    const key = `auth_${token}`;
+    const id = await redisClient.get(key);
+    if (id) {
+      await redisClient.del(key);
+      response.status(204).json({});
+    } else {
+      response.status(401).json({ error: 'Unauthorized' });
+    }
   }
 }
 
-export default AuthController;
+module.exports = AuthController;
